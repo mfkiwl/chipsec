@@ -57,15 +57,12 @@ document id 334818/334819
   <!--                                      -->
   <!-- #################################### -->
   <registers>
-    <!-- Host Controller -->
-
-    <!-- ME Host Firmware Status https://github.com/coreboot/coreboot/blob/master/src/southbridge/intel/*/{pch,me}.h -->
+    <!-- ME Host Firmware Status -->
     <register name="HFS" type="pcicfg" bus="0" dev="0x0F" fun="0" offset="0x40" size="4" desc="ME Host Firmware Status">
-      <field name="MFG_MODE"   bit="4" size="1" desc="ME Manufacturing Mode" />
+      <field name="MFG_MODE"           bit="4"  size="1" desc="ME Manufacturing Mode" />
       <field name="FW_INIT_COMPLETE"   bit="9" size="1" desc="ME Firmware Initialization Complete" />
-      <field name="UPDATE_IN_PROGRESS"   bit="11" size="1" desc="ME Update In Progress" />
+      <field name="UPDATE_IN_PROGRESS" bit="11" size="1" desc="ME Update In Progress" />
     </register>
-
 
     <!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
     <!-- PCIe Configuration registers -->
@@ -372,6 +369,12 @@ document id 334818/334819
     <!-- CPU MSRs                     -->
     <!-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~ -->
     <register name="MSR_POWER_MISC" type="msr" msr="0x120" desc="MISC" />
+    
+    <!-- MSR_SMM_FEATURE_CONTROL -->
+    <register name="MSR_SMM_FEATURE_CONTROL" type="msr" msr="0x4E0" desc="Enhanced SMM Feature Control">
+      <field name="LOCK"            bit="0" size="1"  desc="Lock bit" />
+      <field name="SMM_Code_Chk_En" bit="2" size="1"  desc="Prevents SMM from executing code outside the ranges defined by the SMRR" />
+    </register>
   </registers>
 
   <!-- #################################### -->

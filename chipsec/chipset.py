@@ -1,6 +1,6 @@
 #!/usr/bin/python
 #CHIPSEC: Platform Security Assessment Framework
-#Copyright (c) 2010-2020, Intel Corporation
+#Copyright (c) 2010-2021, Intel Corporation
 #
 #This program is free software; you can redistribute it and/or
 #modify it under the terms of the GNU General Public License
@@ -66,6 +66,8 @@ class Cfg:
         self.MEMORY_RANGES = {}
         self.CONTROLS      = {}
         self.BUS           = {}
+        self.LOCKS         = {}
+        self.LOCKEDBY      = {}
         self.XML_CONFIG_LOADED = False
 
 
@@ -212,7 +214,7 @@ class Chipset:
         else:
             cpuid = None
 
-        #initalize chipset values to unknown
+        #initialize chipset values to unknown
         _unknown_platform = True
         self.longname   = 'UnknownPlatform'
         self.vid = 0xFFFF
@@ -256,13 +258,17 @@ class Chipset:
                 self.rid = rid
 
         elif platform_code in self.chipset_codes:
-            # Check if platform code passed in is valid and override configuraiton
+            # Check if platform code passed in is valid and override configuration
             _unknown_platform = False
             self.vid = self.chipset_codes[ platform_code ]['vid']
             self.did = self.chipset_codes[ platform_code ]['did']
             self.rid = 0x00
             self.code = platform_code
             self.longname = platform_code
+            msg = 'Platform: Actual values: VID = 0x{:04X}, DID = 0x{:04X}, RID = 0x{:02X}'.format(vid, did, rid)
+            if cpuid:
+                msg += ', CPUID = 0x{}'.format(cpuid)
+            logger().log("[CHIPSEC] {}".format(msg))
 
         if req_pch_code is not None:
             # Check if pch code passed in is valid
@@ -273,6 +279,8 @@ class Chipset:
                 self.pch_code = req_pch_code
                 self.pch_longname = req_pch_code
                 _unknown_pch = False
+                msg = 'PCH     : Actual values: VID = 0x{:04X}, DID = 0x{:04X}, RID = 0x{:02X}'.format(pch_vid, pch_did, pch_rid)
+                logger().log("[CHIPSEC] {}".format(msg))
         elif pch_vid in self.pch_dictionary.keys() and pch_did in self.pch_dictionary[pch_vid].keys():
             #Check if pch did for device 0:31:0 is in configuration
             self.pch_vid = pch_vid
@@ -283,16 +291,25 @@ class Chipset:
             self.pch_longname   = data_dict['longname']
             _unknown_pch = False
 
-        if _unknown_platform and start_driver:
-            msg = 'Unsupported Platform: VID = 0x{:04X}, DID = 0x{:04X}, RID = 0x{:02X}'.format(vid, did, rid)
-            logger().error( msg )
-            raise UnknownChipsetError (msg)
-        if not _unknown_platform: # don't intialize config if platform is unknown
+        if _unknown_platform:
+            msg = 'Unknown Platform: VID = 0x{:04X}, DID = 0x{:04X}, RID = 0x{:02X}'.format(vid, did, rid)
+            if start_driver:
+                logger().error(msg)
+                raise UnknownChipsetError(msg)
+            else:
+                logger().log("[!]       {}; Using Default.".format(msg))
+        if not _unknown_platform: # don't initialize config if platform is unknown
             self.init_cfg()
-        if self.reqs_pch and _unknown_pch and start_driver:
-            msg = 'Chipset requires a supported PCH to be loaded: VID = 0x{:04X}, DID = 0x{:04X}, RID = 0x{:02X}'.format(pch_vid, pch_did, pch_rid)
-            logger().error( msg )
-            raise UnknownChipsetError (msg)
+        if _unknown_pch:
+            msg = 'Unknown PCH: VID = 0x{:04X}, DID = 0x{:04X}, RID = 0x{:02X}'.format(pch_vid, pch_did, pch_rid)
+            if self.reqs_pch and start_driver:
+                logger().error("Chipset requires a supported PCH to be loaded. {}".format(msg))
+                raise UnknownChipsetError(msg)
+            else:
+                logger().log("[!]       {}; Using Default.".format(msg))
+        if _unknown_pch or _unknown_platform:
+            msg = 'Results from this system may be incorrect.'
+            logger().log("[!]            {}".format(msg))
 
     def destroy( self, start_driver ):
         self.helper.stop( start_driver )
@@ -545,6 +562,12 @@ class Chipset:
                     if _register.find('field') is not None:
                         for _field in _register.iter('field'):
                             _field_name = _field.attrib['name']
+                            if 'lockedby' in _field.attrib:
+                                _lockedby = _field.attrib['lockedby']
+                                if _lockedby in self.Cfg.LOCKEDBY.keys():
+                                    self.Cfg.LOCKEDBY[_lockedby].append((_name, _field_name))
+                                else:
+                                    self.Cfg.LOCKEDBY[_lockedby] = [(_name, _field_name)]
                             del _field.attrib['name']
                             if 'desc' not in _field.attrib: _field.attrib['desc'] = ''
                             reg_fields[ _field_name ] = _field.attrib
@@ -563,6 +586,18 @@ class Chipset:
                         continue
                     self.Cfg.CONTROLS[ _name ] = _control.attrib
                     if logger().DEBUG: logger().log( "    + {:16}: {}".format(_name, _control.attrib) )
+            if logger().DEBUG: logger().log("[*] loading locks..")
+            for _locks in _cfg.iter('locks'):
+                for _lock in _locks.iter('lock'):
+                    _name = _lock.attrib['name']
+                    del _lock.attrib['name']
+                    if 'undef' in _lock.attrib:
+                        if _name in self.Cfg.LOCKS:
+                            if logger().DEBUG: logger().log("    - {:16}: {}".format(_name, _control.attrib['undef']))
+                            self.Cfg.LOCKS.pop(_name, None)
+                        continue
+                    self.Cfg.LOCKS[_name] = _lock.attrib
+                    if logger().DEBUG: logger().log("    + {:16}: {}".format(_name, _lock.attrib))
 
     def init_cfg_bus( self ):
         if logger().DEBUG: logger().log( '[*] loading device buses..' )
@@ -734,11 +769,21 @@ class Chipset:
         return reg_def
 
     def get_register_bus(self, reg_name):
-        name = self.Cfg.REGISTERS[reg_name].get( 'device', None )
-        return self.get_device_bus( name )
+        device = self.Cfg.REGISTERS[reg_name].get( 'device', '' )
+        if not device:
+            if logger().DEBUG:
+                logger().warn( "No device found for '{}'".format(reg_name) )
+            if 'bus' in self.Cfg.REGISTERS[reg_name]:
+                return [self.Cfg.REGISTERS[reg_name]['bus']]
+            else:
+                return []
+        return self.get_device_bus( device )
 
     def get_device_bus(self, dev_name):
-        return self.Cfg.BUS.get( dev_name, None )
+        bus = []
+        if self.is_device_defined(dev_name):
+            bus = [self.get_device_BDF(dev_name)[0]]
+        return self.Cfg.BUS.get(dev_name, bus)
 
     def read_register(self, reg_name, cpu_thread=0, bus_index=0):
         reg = self.get_register_def( reg_name, bus_index )
@@ -784,7 +829,7 @@ class Chipset:
     def read_register_all(self, reg_name, cpu_thread=0):
         values = []
         bus_data = self.get_register_bus( reg_name )
-        if bus_data is None:
+        if not bus_data:
             return [self.read_register( reg_name, cpu_thread )]
         for index in range( len(bus_data) ):
             values.append( self.read_register( reg_name, cpu_thread, index) )
@@ -833,7 +878,7 @@ class Chipset:
 
     def write_register_all(self, reg_name, reg_values, cpu_thread=0):
         bus_data = self.get_register_bus( reg_name )
-        if bus_data is None:
+        if not bus_data:
             return False
         values = len(bus_data)
         if len(reg_values) == values:
@@ -845,7 +890,7 @@ class Chipset:
 
     def write_register_all_single(self, reg_name, reg_value, cpu_thread=0):
         bus_data = self.get_register_bus( reg_name )
-        if bus_data is None:
+        if not bus_data:
             return False
         values = len(bus_data)
         for index in range( values ):
@@ -1001,7 +1046,7 @@ class Chipset:
     def print_register_all(self, reg_name, cpu_thread=0):
         reg_str = ''
         bus_data = self.get_register_bus( reg_name )
-        if bus_data is None:
+        if not bus_data:
             return reg_str
         for index in range( len(bus_data) ):
             reg_val = self.read_register( reg_name, cpu_thread, index )
@@ -1028,6 +1073,57 @@ class Chipset:
             return (self.Cfg.CONTROLS[ control_name ] is not None)
         except KeyError:
             return False
+
+    def get_lock(self, lock_name, cpu_thread=0, with_print=0, bus_index=None):
+        lock = self.Cfg.LOCKS[lock_name]
+        reg     = lock['register']
+        field   = lock['field']
+        if bus_index is None:
+            reg_data = self.read_register_all(reg, cpu_thread)
+        else:
+            reg_data = self.read_register(reg, cpu_thread, bus_index)
+            reg_data = [reg_data]
+        if logger().DEBUG or with_print:
+            for rd in reg_data:
+                self.print_register(reg, rd)
+        return self.get_register_field_all(reg, reg_data, field)
+
+    def set_lock(self, lock_name, lock_value, cpu_thread=0, bus_index=None):
+        lock = self.Cfg.LOCKS[lock_name]
+        reg     = lock['register']
+        field   = lock['field']
+        reg_data = self.read_register(reg, cpu_thread, bus_index)
+        reg_data = self.set_register_field(reg, reg_data, field, lock_value, True)
+        if bus_index is None:
+            return self.write_register_all_single(reg, reg_data, cpu_thread)
+        else:
+            return self.write_register(reg, reg_data, cpu_thread, bus_index)
+
+    def is_lock_defined(self, lock_name):
+        return lock_name in self.Cfg.LOCKS.keys()
+
+    def get_locked_value(self, lock_name):
+        if logger().DEBUG:
+            logger().log('Retrieve value for lock {}'.format(lock_name))
+        return int(self.Cfg.LOCKS[lock_name]['value'], 16)
+
+    def get_lock_desc(self, lock_name):
+        return self.Cfg.LOCKS[lock_name]['desc']
+
+    def get_lock_list(self):
+        return self.Cfg.LOCKS.keys()
+
+    def get_lock_mask(self, lock_name):
+        lock = self.Cfg.LOCKS[lock_name]
+        reg     = lock['register']
+        field   = lock['field']
+        return(self.get_register_field_mask(reg,field))
+
+    def get_lockedby(self, lock_name):
+        if lock_name in self.Cfg.LOCKEDBY.keys():
+            return self.Cfg.LOCKEDBY[lock_name]
+        else:
+            return None
 
     def is_all_value(self, reg_values, value):
         return all(n == value for n in reg_values)

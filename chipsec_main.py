@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #CHIPSEC: Platform Security Assessment Framework
-#Copyright (c) 2010-2020, Intel Corporation
+#Copyright (c) 2010-2021, Intel Corporation
 #
 #This program is free software; you can redistribute it and/or
 #modify it under the terms of the GNU General Public License
@@ -389,6 +389,7 @@ class ChipsecMain:
         options.add_argument('--hal', help='HAL mode', action='store_true')
         options.add_argument('-d', '--debug', help='debug mode', action='store_true')
         options.add_argument('-l', '--log', help='output to log file')
+        options.add_argument('-vv', '--vverbose', help='very verbose HAL debug mode', action='store_true')
         adv_options = parser.add_argument_group('Advanced Options')
         adv_options.add_argument('-p', '--platform', dest='_platform', help='explicitly specify platform code', choices=chipset.cs().chipset_codes, type=str.upper)
         adv_options.add_argument('--pch', dest='_pch', help='explicitly specify PCH code', choices=chipset.cs().pch_codes, type=str.upper)
@@ -406,6 +407,8 @@ class ChipsecMain:
         adv_options.add_argument('--record', dest='_to_file', help='run chipsec and clone helper results into JSON file')
         adv_options.add_argument('--replay', dest='_from_file', help='replay a chipsec run with JSON file')
         adv_options.add_argument('--helper', dest='_driver_exists', help='specify OS Helper', choices=[i for i in oshelper.avail_helpers])
+        adv_options.add_argument('-nb', '--no_banner', dest='_show_banner', help="chipsec won't display banner information", action='store_false')
+        adv_options.add_argument('--skip_config', dest='_load_config', help='skip configuration and driver loading', action='store_false')
 
         parser.parse_args(self.argv, namespace=ChipsecMain)
 
@@ -417,6 +420,10 @@ class ChipsecMain:
             logger().HAL     = True
         if self.debug:
             logger().DEBUG   = True
+        if self.vverbose:
+            logger().VERBOSE = True
+            logger().DEBUG   = True
+            logger().HAL     = True
         if self.log:
             logger().set_log_file( self.log )
         if self._module_argv and len(self._module_argv) == 1 and self._module_argv[0].count(','):
@@ -459,7 +466,8 @@ class ChipsecMain:
 
         self.init_cs()
 
-        self.print_banner()
+        if self._show_banner:
+            self.print_banner()
 
         for import_path in self.IMPORT_PATHS:
             sys.path.append(os.path.abspath( import_path ) )
@@ -468,29 +476,33 @@ class ChipsecMain:
         #    logger().error( "incompatible options: --no_driver and --exists" )
         #    return ExitCode.EXCEPTION
 
-        try:
-            self._cs.init( self._platform, self._pch, (not self._no_driver), self._driver_exists, self._to_file, self._from_file )
-        except chipset.UnknownChipsetError as msg:
-            logger().error( "Platform is not supported ({}).".format(str(msg)) )
-            if self._unknownPlatform:
-                logger().error('To specify a cpu please use -p command-line option')
-                logger().error('To specify a pch please use --pch command-line option\n')
-                logger().error('To load legacy configuraiton and run anyways please use -i command-line option')
+        if self._load_config:
+            try:
+                self._cs.init( self._platform, self._pch, (not self._no_driver), self._driver_exists, self._to_file, self._from_file )
+            except chipset.UnknownChipsetError as msg:
+                logger().error( "Platform is not supported ({}).".format(str(msg)) )
+                if self._unknownPlatform:
+                    logger().error('To specify a cpu please use -p command-line option')
+                    logger().error('To specify a pch please use --pch command-line option\n')
+                    logger().error('To load legacy configuration and run anyways please use -i command-line option')
+                    if logger().DEBUG: logger().log_bad(traceback.format_exc())
+                    if self.failfast: raise msg
+                    return  ExitCode.EXCEPTION
+                logger().warn("Platform dependent functionality is likely to be incorrect")
+            except oshelper.OsHelperError as os_helper_error:
+                logger().error(str(os_helper_error))
                 if logger().DEBUG: logger().log_bad(traceback.format_exc())
-                if self.failfast: raise msg
-                return  ExitCode.EXCEPTION
+                if self.failfast: raise os_helper_error
+                return ExitCode.EXCEPTION
+            except BaseException as be:
+                logger().log_bad(traceback.format_exc())
+                if self.failfast: raise be
+                return ExitCode.EXCEPTION
+        else:
             logger().warn("Platform dependent functionality is likely to be incorrect")
-        except oshelper.OsHelperError as os_helper_error:
-            logger().error(str(os_helper_error))
-            if logger().DEBUG: logger().log_bad(traceback.format_exc())
-            if self.failfast: raise os_helper_error
-            return ExitCode.EXCEPTION
-        except BaseException as be:
-            logger().log_bad(traceback.format_exc())
-            if self.failfast: raise be
-            return ExitCode.EXCEPTION
 
-        self.log_properties()
+        if self._show_banner:
+            self.log_properties()
 
         logger().log( " " )
 

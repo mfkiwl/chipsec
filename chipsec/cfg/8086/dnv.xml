@@ -11,6 +11,9 @@ XML configuration file for Denverton
   <!-- #################################### -->
   <info family="atom">
     <sku did="0x1980" name="Denverton" code="DNV" longname="Intel Atom Processor C3000 Product Family" />
+    <sku did="0x1993" name="Denverton" code="DNV" longname="Intel Atom Processor C3000 Product Family" />
+    <sku did="0x1994" name="Denverton" code="DNV" longname="Intel Atom Processor C3000 Product Family" />
+    <sku did="0x1997" name="Denverton" code="DNV" longname="Intel Atom Processor C3000 Product Family" />
   </info>
 
   <pci>
@@ -34,10 +37,6 @@ XML configuration file for Denverton
     </register>
     <register name="SMBUS_HCFG" type="pcicfg" bus="0" dev="0x1F" fun="4" offset="0x40" size="1" desc="Host Configuration">
       <field name="SPD_WD" bit="4" size="1" desc="SPD Write Disable"/>
-    </register>
-    <register name="SMI_EN" type="iobar" bar="ABASE" offset="0x30" size="4" desc="SMI Control and Enable">
-      <field name="GBL_SMI_EN" bit="0"  size="1"/>
-      <field name="TCO_EN"     bit="13" size="1"/>
     </register>
     <register name="TCO1_CNT" type="iobar" bar="TCOBASE" offset="0x8" size="4" desc="SMI Control and Enable">
       <field name="TCO_LOCK" bit="12" size="1"/>
@@ -170,11 +169,17 @@ XML configuration file for Denverton
       <field name="CPPTV"        bit="31" size="1" desc="Component Property Parameter Table Valid"/>
     </register>
 
-    <!-- ME Host Firmware Status https://github.com/coreboot/coreboot/blob/master/src/southbridge/intel/*/{pch,me}.h -->
+    <!-- ME Host Firmware Status -->
     <register name="HFS" type="pcicfg" bus="0" dev="0x18" fun="0" offset="0x40" size="4" desc="ME Host Firmware Status">
-      <field name="MFG_MODE"   bit="4" size="1" desc="ME Manufacturing Mode" />
-      <field name="FW_INIT_COMPLETE"   bit="9" size="1" desc="ME Firmware Initialization Complete" />
-      <field name="UPDATE_IN_PROGRESS"   bit="11" size="1" desc="ME Update In Progress" />
+      <field name="MFG_MODE"           bit="4"  size="1" desc="ME Manufacturing Mode" />
+      <field name="FW_INIT_COMPLETE"   bit="9"  size="1" desc="ME Firmware Initialization Complete" />
+      <field name="UPDATE_IN_PROGRESS" bit="11" size="1" desc="ME Update In Progress" />
+    </register>
+    
+    <!-- MSR_SMM_FEATURE_CONTROL -->
+    <register name="MSR_SMM_FEATURE_CONTROL" type="msr" msr="0x4E0" desc="Enhanced SMM Feature Control">
+      <field name="LOCK"            bit="0" size="1"  desc="Lock bit" />
+      <field name="SMM_Code_Chk_En" bit="2" size="1"  desc="Prevents SMM from executing code outside the ranges defined by the SMRR" />
     </register>
 
   </registers>

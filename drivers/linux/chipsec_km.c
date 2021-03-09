@@ -32,9 +32,10 @@ chipsec@intel.com
 
 #include "include/chipsec.h"
 
-#ifdef HAS_EFI
+#ifdef CONFIG_EFI
     #include <linux/efi.h>
 #endif
+
 
 #define _GNU_SOURCE
 #define CHIPSEC_VER_ 		1
@@ -48,6 +49,29 @@ MODULE_LICENSE("GPL");
 #    define IOREMAP_NO_CACHE(address, size) ioremap(address, size)
 #else /* KERNEL_VERSION < 2.6.25 */
 #    define IOREMAP_NO_CACHE(address, size) ioremap_nocache(address, size)
+#endif
+
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+#include <linux/static_call.h>
+#include <linux/kprobes.h>
+
+static struct kprobe kp = {
+    .symbol_name = "kallsyms_lookup_name",
+    .flags = KPROBE_FLAG_DISABLED
+};
+
+unsigned long kallsyms_lookup_name_c(const char *name)
+{
+	return 0;
+}
+int page_is_ram_c(unsigned long pagenr)
+{
+	return 0;
+}
+
+DEFINE_STATIC_CALL(chipsec_lookup_name_sc, kallsyms_lookup_name_c);
+DEFINE_STATIC_CALL(chipsec_page_is_ram_sc, page_is_ram_c);
 #endif
 
 // function page_is_ram is not exported 
@@ -65,6 +89,11 @@ module_param(a2,ulong,0); //a2 is addr of phys_mem_access_prot function
 
 /// Char we show before each debug print
 const char program_name[] = "chipsec";
+
+// read kernel symbols from the /proc
+#define KALLSYMS_PATH "/proc/kallsyms"
+#define BUFF_SIZE 128
+char read_buf[BUFF_SIZE] = {0};
 
 // list of allocated memory
 struct allocated_mem_list allocated_mem_list;
@@ -300,8 +329,11 @@ void *my_xlate_dev_mem_ptr(unsigned long phys)
 	unsigned long pfn = PFN_DOWN(phys);
 	
         /* If page is RAM, we can use __va. Otherwise ioremap and unmap. */
-        if ((*guess_page_is_ram)(start >> PAGE_SHIFT)) {
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+	if (static_call(chipsec_page_is_ram_sc)(start >> PAGE_SHIFT)) {
+#else
+	if ((*guess_page_is_ram)(start >> PAGE_SHIFT)) {
+#endif
 		if (PageHighMem(pfn_to_page(pfn))) {
                 /* The buffer does not have a mapping.  Map it! */
 		        addr = kmap(pfn_to_page(pfn));	
@@ -334,7 +366,11 @@ void my_unxlate_dev_mem_ptr(unsigned long phys,void *addr)
 
 	/* If page is RAM, check for highmem, and eventualy do nothing. 
 	   Otherwise need to iounmap. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+	if (static_call(chipsec_page_is_ram_sc)((phys >> PAGE_SHIFT))) {
+#else
 	if ((*guess_page_is_ram)(phys >> PAGE_SHIFT)) {
+#endif
 	
 		if (PageHighMem(pfn_to_page(pfn))) { 
 		/* Need to kunmap kmaped memory*/
@@ -435,14 +471,21 @@ static ssize_t read_mem(struct file * file, char __user * buf, size_t count, lof
 			dbgprint ("xlate FAIL, p: %lX",p);
 			return -EFAULT;
 		}
-                
-                plb = kmalloc(sz, GFP_KERNEL );
-                memset(plb, 0, sz);
-                memcpy(plb,(char *)ptr, sz);
+
+		plb = kmalloc(sz, GFP_KERNEL );
+		if( !plb )
+		{
+			printk(KERN_ALERT "[chipsec] ERROR: STATUS_UNSUCCESSFUL - could not allocate memory\n" );
+			return -EFAULT;
+		}
+
+		memset(plb, 0, sz);
+		memcpy(plb,(char *)ptr, sz);
 
 		if (copy_to_user(buf, plb, sz)) {
 			dbgprint ("copy_to_user FAIL, ptr: %p",ptr);
 			my_unxlate_dev_mem_ptr(p, ptr);
+			kfree(plb);
 			return -EFAULT;
 		}
 
@@ -452,6 +495,8 @@ static ssize_t read_mem(struct file * file, char __user * buf, size_t count, lof
 		p += sz;
 		count -= sz;
 		read += sz;
+
+		kfree(plb);
 	}
 
 	*ppos += read;
@@ -555,11 +600,22 @@ int __weak phys_mem_access_prot_allowed(struct file *file,
         return 1;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,1,12) && defined(ARCH_HAS_VALID_PHYS_ADDR_RANGE) && !defined(__HAVE_ARCH_PAX_OPEN_USERLAND)
+#if defined(__HAVE_ARCH_PAX_OPEN_USERLAND)
+#if LINUX_VERSION_CODE > KERNEL_VERSION(4,14,0) && defined(ARCH_HAS_VALID_PHYS_ADDR_RANGE)
 int valid_mmap_phys_addr_range(unsigned long pfn, size_t size)
 {
 	return 1;
 }
+#endif
+
+#else
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,1,12) && defined(ARCH_HAS_VALID_PHYS_ADDR_RANGE)
+int valid_mmap_phys_addr_range(unsigned long pfn, size_t size)
+{
+	return 1;
+}
+#endif
 #endif
 
 #ifndef ARCH_HAS_VALID_PHYS_ADDR_RANGE
@@ -724,6 +780,17 @@ void print_stat(efi_status_t stat)
 }
 #endif
 
+static void apply_ucode_patch(void *info)
+{
+	CPUID_CTX *cpuinfo = (CPUID_CTX *)info;
+	__cpuid__(cpuinfo);
+}
+
+static unsigned long hypercall_page_c(void)
+{
+	return hypercall_page();
+}
+
 static long d_ioctl(struct file *file, unsigned int ioctl_num, unsigned long ioctl_param)
 {
 	int numargs = 0;
@@ -735,7 +802,6 @@ static long d_ioctl(struct file *file, unsigned int ioctl_num, unsigned long ioc
 	//unsigned int counter;
 	char small_buffer[6]; //32 bits + char + \0
 	unsigned long CPUInfo[4]={1,0,0,0};
-	void (*apply_ucode_patch_p)(void *info);
 
 	switch(ioctl_num)
 	{
@@ -852,8 +918,7 @@ static long d_ioctl(struct file *file, unsigned int ioctl_num, unsigned long ioc
 		printk(KERN_INFO "[chipsec] [patch_apply_ucode] clear IA32_BIOS_SIGN_ID, CPUID EAX=1, read back IA32_BIOS_SIGN_ID\n" );
 
 		wrmsr_on_cpu(thread_id, MSR_IA32_BIOS_SIGN_ID, (u32)_eax[1], (u32)_edx[1]);
-		apply_ucode_patch_p=(void *)__cpuid__;
-		smp_call_function_single(thread_id, apply_ucode_patch_p, (CPUID_CTX *)CPUInfo,0);
+		smp_call_function_single(thread_id, apply_ucode_patch, (void *)CPUInfo,0);
 		rdmsr_on_cpu(thread_id, MSR_IA32_BIOS_SIGN_ID, (u32*)&_eax[1], (u32*)&_edx[1]);
 
 		if (_edx[1] != _edx[0])
@@ -1576,8 +1641,6 @@ static long d_ioctl(struct file *file, unsigned int ioctl_num, unsigned long ioc
 			return -EFAULT;
 		}
 
-		ptrbuf[11] = (unsigned long)&hypercall_page;
-
 		#ifdef HYPERCALL_DEBUG
 		printk( KERN_DEBUG "[chipsec] > IOCTL_HYPERCALL\n");
 		#ifdef __x86_64__
@@ -1594,7 +1657,7 @@ static long d_ioctl(struct file *file, unsigned int ioctl_num, unsigned long ioc
 		printk( KERN_DEBUG "    Hypercall page VA   = 0x%016lX\n", ptrbuf[11]);
 		#endif
 
-		ptrbuf[0]  = hypercall(ptrbuf[0], ptrbuf[1], ptrbuf[2], ptrbuf[3], ptrbuf[4], ptrbuf[5], ptrbuf[6], ptrbuf[7], ptrbuf[8], ptrbuf[9], ptrbuf[10], ptrbuf[11]);
+		ptrbuf[0]  = hypercall(ptrbuf[0], ptrbuf[1], ptrbuf[2], ptrbuf[3], ptrbuf[4], ptrbuf[5], ptrbuf[6], ptrbuf[7], ptrbuf[8], ptrbuf[9], ptrbuf[10], (unsigned long)&hypercall_page_c);
 
 		#ifdef HYPERCALL_DEBUG
 		printk( KERN_DEBUG "    Hypercall status    = 0x%016lX\n", ptrbuf[0]);
@@ -1676,6 +1739,113 @@ static struct miscdevice chipsec_dev = {
     .fops = &mem_fops
 };
 
+/*
+ * 0ld dog never die:
+ * https://gist.githubusercontent.com/GoldenOak/a8cd563d671af04a3d387d198aa3ecf8/raw/8dcc90dbbf9b9ffd65cc2c03f1cd48445b84c2b6/obtain_syscall_table_by_proc.c
+*/
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0) && LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
+
+unsigned long chipsec_lookup_name(const char *name)
+{
+	char *file_name                       = KALLSYMS_PATH;
+	int i                                 = 0;         /* Read Index */
+	struct file *proc_ksyms               = NULL;      /* struct file the '/proc/kallsyms' or '/proc/ksyms' */
+	char *sct_addr_str                    = NULL;      /* buffer for save sct addr as str */
+	char proc_ksyms_entry[BUFF_SIZE]  = {0};       /* buffer for each line at file */
+	unsigned long* res                    = NULL;
+	unsigned long ret;
+	char *proc_ksyms_entry_ptr            = NULL;
+	int read                              = 0;
+	int err = 0;
+	mm_segment_t oldfs;
+
+
+	/* Allocate place for sct addr as str */
+	if((sct_addr_str = (char*)kmalloc(BUFF_SIZE * sizeof(char), GFP_KERNEL)) == NULL)
+		goto CLEAN_UP;
+
+	proc_ksyms = filp_open(file_name, O_RDONLY, 0);
+       	if (proc_ksyms == NULL)
+		goto CLEAN_UP;
+
+	oldfs = get_fs();
+	set_fs (KERNEL_DS);
+	read = proc_ksyms->f_op->read(proc_ksyms, proc_ksyms_entry + i, 1, &(proc_ksyms->f_pos));
+	set_fs(oldfs);
+
+	while( read == 1)
+	{
+		if(proc_ksyms_entry[i] == '\n' || i == BUFF_SIZE)
+		{
+			if(strstr(proc_ksyms_entry, name) != NULL)
+			{
+
+                        	printk(KERN_INFO"[+] %s: %s", name, proc_ksyms_entry);
+
+				proc_ksyms_entry_ptr = proc_ksyms_entry;
+				strncpy(sct_addr_str, strsep(&proc_ksyms_entry_ptr, " "), BUFF_SIZE);
+				if((res = kmalloc(sizeof(unsigned long), GFP_KERNEL)) == NULL)
+					goto CLEAN_UP;
+				err = kstrtoul(sct_addr_str, 16, res);
+				goto CLEAN_UP;
+			}
+
+			i = -1;
+			memset(proc_ksyms_entry, 0, BUFF_SIZE);
+		}
+
+		i++;
+
+	oldfs = get_fs();
+	set_fs (KERNEL_DS);
+	read = proc_ksyms->f_op->read(proc_ksyms, proc_ksyms_entry + i, 1, &(proc_ksyms->f_pos));
+	set_fs(oldfs);	
+	}
+
+
+CLEAN_UP:
+	if(res != NULL){
+		ret = *res;
+		kfree(res);
+	}
+	if(sct_addr_str != NULL)
+		kfree(sct_addr_str);
+	if(proc_ksyms != NULL)
+		filp_close(proc_ksyms, 0);
+
+	return ret;
+}
+
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+
+unsigned long chipsec_lookup_name(const char *name)
+{
+	int kp_ret = 0;
+	unsigned long kaddr = 0;
+
+	unsigned long (*chipsec_lookup_name_fp)(const char *name);
+
+	kp_ret = register_kprobe(&kp);
+	if(kp_ret < 0){
+		printk(KERN_ALERT"register_kprobe failed, returned %d\n", kp_ret);
+		return kp_ret;
+	}
+
+	chipsec_lookup_name_fp = (unsigned long (*) (const char *name))kp.addr;
+	unregister_kprobe(&kp);
+
+	static_call_update(chipsec_lookup_name_sc, chipsec_lookup_name_fp);
+	kaddr = static_call(chipsec_lookup_name_sc)(name);
+
+	return kaddr;
+}
+#else
+unsigned long chipsec_lookup_name(const char *name){
+	return kallsyms_lookup_name(name);
+}
+
+#endif
+
 int find_symbols(void) 
 {
 	//Older kernels don't have kallsyms_lookup_name. Use FMEM method (pass from run.sh)
@@ -1690,9 +1860,12 @@ int find_symbols(void)
 		guess_phys_mem_access_prot = &cs_phys_mem_access_prot;
 		#endif
 	#else
-		guess_page_is_ram = (void *)kallsyms_lookup_name("page_is_ram");
+		guess_page_is_ram = (void *)chipsec_lookup_name("page_is_ram");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+		static_call_update(chipsec_page_is_ram_sc, guess_page_is_ram);
+#endif	
 		#ifdef __HAVE_PHYS_MEM_ACCESS_PROT
-		guess_phys_mem_access_prot = (void *)kallsyms_lookup_name("phys_mem_access_prot");
+		guess_phys_mem_access_prot = (void *)chipsec_lookup_name("phys_mem_access_prot");
 		#else
 		guess_phys_mem_access_prot = &cs_phys_mem_access_prot;
 		#endif

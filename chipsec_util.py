@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #CHIPSEC: Platform Security Assessment Framework
-#Copyright (c) 2010-2020, Intel Corporation
+#Copyright (c) 2010-2021, Intel Corporation
 #
 #This program is free software; you can redistribute it and/or
 #modify it under the terms of the GNU General Public License
@@ -68,9 +68,10 @@ class ChipsecUtil:
         self.PYTHON_64_BITS = True if (sys.maxsize > 2**32) else False
 
         self.argv = argv
-        self.print_banner()
         self.import_cmds()
         self.parse_args()
+        if self._show_banner:
+            self.print_banner()
 
     def init_cs(self):
         self._cs = cs()
@@ -82,6 +83,7 @@ class ChipsecUtil:
         options.add_argument('-v', '--verbose', help='verbose mode', action='store_true')
         options.add_argument('--hal', help='HAL mode', action='store_true')
         options.add_argument('-d', '--debug', help='debug mode', action='store_true')
+        options.add_argument('-vv', '--vverbose', help='very verbose HAL debug mode', action='store_true')
         options.add_argument('-l', '--log', help='output to log file')
         options.add_argument('-p', '--platform', dest='_platform', help='explicitly specify platform code', choices=cs().chipset_codes, type=str.upper)
         options.add_argument('--pch', dest='_pch', help='explicitly specify PCH code', choices=cs().pch_codes, type=str.upper)
@@ -90,6 +92,8 @@ class ChipsecUtil:
         options.add_argument('--helper', dest='_driver_exists', help='specify OS Helper', choices=[i for i in oshelper.avail_helpers])
         options.add_argument('_cmd', metavar='Command', nargs='?', choices=sorted(self.commands.keys()), type=str.lower, default="help",  help="Util command to run: {{{}}}".format(','.join(sorted(self.commands.keys()))))
         options.add_argument('_cmd_args', metavar='Command Args', nargs=argparse.REMAINDER, help=self.global_usage)
+        options.add_argument('-nb', '--no_banner', dest='_show_banner', help="chipsec won't display banner information", action='store_false')
+        options.add_argument('--skip_config', dest='_load_config', help='skip configuration and driver loading', action='store_false')
 
         parser.parse_args(self.argv, namespace=ChipsecUtil)
         if self.show_help or self._cmd == "help":
@@ -99,6 +103,10 @@ class ChipsecUtil:
         if self.hal:
             logger().HAL     = True
         if self.debug:
+            logger().DEBUG   = True
+        if self.vverbose:
+            logger().VERBOSE = True
+            logger().HAL     = True
             logger().DEBUG   = True
         if self.log:
             logger().set_log_file( self.log )
@@ -151,24 +159,31 @@ class ChipsecUtil:
         self.argv = ['dummy'] + [self._cmd] + self._cmd_args
         comm = self.commands[self._cmd](self.argv, cs = self._cs)
 
-        try:
-            self._cs.init( self._platform, self._pch, comm.requires_driver() and not self._no_driver, self._driver_exists)
-        except UnknownChipsetError as msg:
-            logger().warn("*******************************************************************")
-            logger().warn("* Unknown platform!")
-            logger().warn("* Platform dependent functionality will likely be incorrect")
-            logger().warn("* Error Message: \"{}\"".format(str(msg)))
-            logger().warn("*******************************************************************")
-            if self._unknownPlatform:
-                logger().error('To run anyways please use -i command-line option\n\n')
+        if self._load_config:
+            try:
+                self._cs.init( self._platform, self._pch, comm.requires_driver() and not self._no_driver, self._driver_exists)
+            except UnknownChipsetError as msg:
+                logger().warn("*******************************************************************")
+                logger().warn("* Unknown platform!")
+                logger().warn("* Platform dependent functionality will likely be incorrect")
+                logger().warn("* Error Message: \"{}\"".format(str(msg)))
+                logger().warn("*******************************************************************")
+                if self._unknownPlatform:
+                    logger().error('To run anyways please use -i command-line option\n\n')
+                    sys.exit(ExitCode.OK)
+            except Exception as msg:
+                logger().error(str(msg))
+                sys.exit(ExitCode.EXCEPTION)
+        else:
+            if comm.requires_driver():
+                logger().error("Cannot run without driver loaded")
                 sys.exit(ExitCode.OK)
-        except Exception as msg:
-            logger().error(str(msg))
-            sys.exit(ExitCode.EXCEPTION)
-        logger().log("[CHIPSEC] Helper  : {} ({})".format(*self._cs.helper.helper.get_info()))
-        logger().log("[CHIPSEC] Platform: {}\n[CHIPSEC]      VID: {:04X}\n[CHIPSEC]      DID: {:04X}\n[CHIPSEC]      RID: {:02X}".format(self._cs.longname, self._cs.vid, self._cs.did, self._cs.rid))
-        if not self._cs.is_atom():
-            logger().log("[CHIPSEC] PCH     : {}\n[CHIPSEC]      VID: {:04X}\n[CHIPSEC]      DID: {:04X}\n[CHIPSEC]      RID: {:02X}".format(self._cs.pch_longname, self._cs.pch_vid, self._cs.pch_did, self._cs.pch_rid))
+
+        if self._show_banner:
+            logger().log("[CHIPSEC] Helper  : {} ({})".format(*self._cs.helper.helper.get_info()))
+            logger().log("[CHIPSEC] Platform: {}\n[CHIPSEC]      VID: {:04X}\n[CHIPSEC]      DID: {:04X}\n[CHIPSEC]      RID: {:02X}".format(self._cs.longname, self._cs.vid, self._cs.did, self._cs.rid))
+            if not self._cs.is_atom():
+                logger().log("[CHIPSEC] PCH     : {}\n[CHIPSEC]      VID: {:04X}\n[CHIPSEC]      DID: {:04X}\n[CHIPSEC]      RID: {:02X}".format(self._cs.pch_longname, self._cs.pch_vid, self._cs.pch_did, self._cs.pch_rid))
 
         logger().log( "[CHIPSEC] Executing command '{}' with args {}\n".format(self._cmd, self.argv[2:]) )
         comm.run()
